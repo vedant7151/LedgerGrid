@@ -78,6 +78,32 @@ public class LedgerEntry {
     @Column(length = 64)
     private String entryHash;
 
+    /**
+     * Whether this entry was flagged as anomalous by the rule-based anomaly detector.
+     */
+    // columnDefinition default lets ddl-auto=update add this NOT NULL column to a table with existing rows.
+    @Column(nullable = false, columnDefinition = "boolean default false")
+    private boolean isAnomalous = false;
+
+    /** Short machine-readable reason (e.g. "AMOUNT_OUTLIER", "FREQUENCY_SPIKE"). */
+    private String anomalyReason;
+
+    public boolean isAnomalous() {
+        return isAnomalous;
+    }
+
+    public void setAnomalous(boolean anomalous) {
+        this.isAnomalous = anomalous;
+    }
+
+    public boolean getIsAnomalous() {
+        return isAnomalous;
+    }
+
+    public void setIsAnomalous(boolean anomalous) {
+        this.isAnomalous = anomalous;
+    }
+
     @PrePersist
     void onCreate() {
         if (recordedAt == null) {

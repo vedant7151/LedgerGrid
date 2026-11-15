@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.payflow.ledger.web.LedgerPage;
 import java.time.Duration;
+import org.springframework.boot.autoconfigure.cache.RedisCacheManagerBuilderCustomizer;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
+import org.springframework.data.redis.cache.RedisCacheManager.RedisCacheManagerBuilder;
 import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext.SerializationPair;
 
@@ -36,5 +38,10 @@ public class CacheConfig {
                 .entryTtl(Duration.ofMinutes(5))
                 .disableCachingNullValues()
                 .serializeValuesWith(SerializationPair.fromSerializer(serializer));
+    }
+
+    @Bean
+    public RedisCacheManagerBuilderCustomizer redisCacheManagerBuilderCustomizer() {
+        return RedisCacheManagerBuilder::enableStatistics;
     }
 }

@@ -11,6 +11,9 @@ services:
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/accounts_db
       REDIS_HOST: redis
+      # Shared JWT secret — all three services must use the same value.
+      # Set JWT_SECRET env var on the host, or override here for local dev.
+      JWT_SECRET: ${JWT_SECRET:-ledgergrid-demo-secret-change-me-in-production-must-be-32chars}
     depends_on:
       postgres:
         condition: service_healthy
@@ -26,6 +29,7 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/transactions_db
       KAFKA_BROKERS: kafka:29092
       ACCOUNTS_URL: http://accounts-service:8081
+      JWT_SECRET: ${JWT_SECRET:-ledgergrid-demo-secret-change-me-in-production-must-be-32chars}
     depends_on:
       postgres:
         condition: service_healthy
@@ -43,6 +47,7 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/ledger_db
       KAFKA_BROKERS: kafka:29092
       REDIS_HOST: redis
+      JWT_SECRET: ${JWT_SECRET:-ledgergrid-demo-secret-change-me-in-production-must-be-32chars}
       # AI categorization key, passed through from the host env (falls back to
       # rule-based categorization when unset). export GEMINI_API_KEY=... to enable.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

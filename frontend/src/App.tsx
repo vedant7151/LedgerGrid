@@ -15,7 +15,10 @@ import {
   Lock,
   ListRestart,
   Check,
-  X
+  X,
+  LogIn,
+  LogOut,
+  KeyRound
 } from 'lucide-react'
 
 // Interface definitions matching Spring Boot records
@@ -103,11 +106,82 @@ export default function App() {
   const [simulatingError, setSimulatingError] = useState(false)
   const succeededTxnIdsRef = useRef<Set<string>>(new Set())
 
-  // Auto-fetch on mount
+  // --- Auth State (Phase 1 JWT Auth - stored in sessionStorage, never localStorage) ---
+  const [authToken, setAuthToken] = useState<string | null>(() => sessionStorage.getItem('payflow_jwt_token'))
+  const [authUser, setAuthUser] = useState<string | null>(() => sessionStorage.getItem('payflow_jwt_user'))
+  const [authRole, setAuthRole] = useState<string | null>(() => sessionStorage.getItem('payflow_jwt_role'))
+  const [loginUsername, setLoginUsername] = useState('admin')
+  const [loginPassword, setLoginPassword] = useState('admin123')
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [loginModalOpen, setLoginModalOpen] = useState(false)
+
+  // Auto-fetch on mount if token is present
   useEffect(() => {
     localStorage.removeItem('payflow_account_ids')
-    loadData()
+    const token = sessionStorage.getItem('payflow_jwt_token')
+    if (token) {
+      loadData(token)
+    }
   }, [])
+
+  // Authenticated fetch wrapper (attaches Authorization: Bearer <token>)
+  const authFetch = async (input: RequestInfo | URL, init: RequestInit = {}, explicitToken?: string): Promise<Response> => {
+    const headers = new Headers(init.headers || {})
+    const token = explicitToken || authToken || sessionStorage.getItem('payflow_jwt_token')
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`)
+    }
+    const res = await fetch(input, { ...init, headers })
+    if (res.status === 401) {
+      handleLogout()
+      addToast('error', 'Authentication Required', 'Unauthenticated or session expired (401). Please log in.')
+    }
+    return res
+  }
+
+  const handleLogin = async (e?: React.FormEvent, customUser?: string, customPass?: string) => {
+    if (e) e.preventDefault()
+    const userToUse = customUser || loginUsername
+    const passToUse = customPass || loginPassword
+    setLoginLoading(true)
+    try {
+      const res = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: userToUse, password: passToUse })
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Invalid credentials')
+      }
+      const data = await res.json()
+      sessionStorage.setItem('payflow_jwt_token', data.token)
+      sessionStorage.setItem('payflow_jwt_user', data.username)
+      sessionStorage.setItem('payflow_jwt_role', data.role)
+      setAuthToken(data.token)
+      setAuthUser(data.username)
+      setAuthRole(data.role)
+      setLoginModalOpen(false)
+      addToast('success', 'Authenticated', `Logged in as ${data.username} (${data.role})`)
+      await loadData(data.token)
+    } catch (err: any) {
+      addToast('error', 'Login Failed', err.message || 'Unable to authenticate')
+    } finally {
+      setLoginLoading(false)
+    }
+  }
+
+  const handleLogout = () => {
+    sessionStorage.removeItem('payflow_jwt_token')
+    sessionStorage.removeItem('payflow_jwt_user')
+    sessionStorage.removeItem('payflow_jwt_role')
+    setAuthToken(null)
+    setAuthUser(null)
+    setAuthRole(null)
+    setAccounts([])
+    setLedger([])
+    setVerification(null)
+  }
 
 
 
@@ -125,11 +199,13 @@ export default function App() {
   }
 
   // Core API loader
-  const loadData = async () => {
+  const loadData = async (overrideToken?: string) => {
+    const token = overrideToken || authToken || sessionStorage.getItem('payflow_jwt_token')
+    if (!token) return
     setLoadingLedger(true)
     try {
       // 1. Fetch all ledger entries
-      const ledgerRes = await fetch('/ledger')
+      const ledgerRes = await authFetch('/ledger', {}, token)
       if (!ledgerRes.ok) throw new Error('Failed to fetch ledger logs')
       const ledgerData: LedgerEntry[] = await ledgerRes.json()
       // Sort ledger entries by chainIndex or recordedAt descending
@@ -153,7 +229,7 @@ export default function App() {
       await Promise.all(
         allUniqueIds.map(async (id) => {
           try {
-            const accRes = await fetch(`/accounts/${id}`)
+            const accRes = await authFetch(`/accounts/${id}`, {}, token)
             if (accRes.ok) {
               const acc: Account = await accRes.json()
               fetchedAccounts.push(acc)
@@ -180,7 +256,7 @@ export default function App() {
     
     setActionLoading('create_account')
     try {
-      const res = await fetch('/accounts', {
+      const res = await authFetch('/accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -281,7 +357,7 @@ export default function App() {
   const handleSimulateError = async () => {
     setSimulatingError(true)
     try {
-      const res = await fetch('/dev/simulate-error', { method: 'POST' })
+      const res = await authFetch('/dev/simulate-error', { method: 'POST' })
       if (res.ok) {
         addToast('info', 'Error Armed', 'Next transaction call will return 503 once. Click "Execute IMPS Transfer" then retry with the same key to see safe idempotency in action.')
       } else {
@@ -305,7 +381,7 @@ export default function App() {
     desc: string
   ) => {
     try {
-      const res = await fetch('/transactions', {
+      const res = await authFetch('/transactions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -386,7 +462,7 @@ export default function App() {
     setVerifyingLedger(true)
     setVerification(null)
     try {
-      const res = await fetch('/ledger/verify')
+      const res = await authFetch('/ledger/verify')
       if (!res.ok) throw new Error('Ledger verification endpoint returned an error')
       const result: VerificationResult = await res.json()
       setVerification(result)
@@ -432,9 +508,33 @@ export default function App() {
               <span className="text-emerald-300">CORE</span>
             </div>
 
+            {/* Auth Session Indicator / Login button */}
+            {authToken ? (
+              <div className="flex items-center gap-2 bg-blue-950/60 border border-blue-400/30 px-2.5 py-1 rounded-lg text-xs">
+                <User className="h-3.5 w-3.5 text-blue-300" />
+                <span className="font-semibold text-white">{authUser}</span>
+                <span className="bg-blue-600/60 text-blue-200 text-[9px] px-1.5 py-0.5 rounded font-mono uppercase font-bold">{authRole}</span>
+                <button
+                  onClick={handleLogout}
+                  className="ml-1 text-blue-300 hover:text-white p-0.5 rounded transition-colors cursor-pointer"
+                  title="Logout"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setLoginModalOpen(true)}
+                className="flex items-center gap-1.5 bg-[#E31E24] hover:bg-red-700 text-white font-bold text-xs px-2.5 py-1 rounded-lg transition-colors cursor-pointer shadow-sm"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                <span>Log In</span>
+              </button>
+            )}
+
             <button
-              onClick={loadData}
-              disabled={loadingAccounts || loadingLedger}
+              onClick={() => loadData()}
+              disabled={loadingAccounts || loadingLedger || !authToken}
               className="p-1.5 text-blue-200 hover:text-white bg-blue-800/40 hover:bg-blue-800/80 disabled:opacity-50 rounded border border-blue-400/25 transition-colors cursor-pointer"
               title="Sync Data"
             >
@@ -443,6 +543,118 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Login Modal Overlay (Phase 1 JWT Auth) */}
+      {(!authToken || loginModalOpen) && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white border border-slate-200 shadow-2xl rounded-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="h-1 bg-[#E31E24] w-full"></div>
+            <div className="bg-[#004C8F] px-5 py-4 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <KeyRound className="h-5 w-5 text-amber-300" />
+                <div>
+                  <h3 className="font-bold text-sm tracking-tight">PayFlow Core Authentication</h3>
+                  <p className="text-[10px] text-blue-100/70">Shared-Secret JWT Bearer Authentication</p>
+                </div>
+              </div>
+              {authToken && (
+                <button
+                  onClick={() => setLoginModalOpen(false)}
+                  className="text-blue-200 hover:text-white p-1 rounded-lg cursor-pointer"
+                  title="Close"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            <div className="p-5">
+              <p className="text-[11px] text-slate-500 mb-4 leading-normal">
+                All three microservices enforce stateless JWT validation. Log in to obtain a signed token and attach it to downstream requests.
+              </p>
+
+              {/* Demo Quick Logins */}
+              <div className="mb-4">
+                <label className="block text-[9.5px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Quick Demo Users</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLoginUsername('admin')
+                      setLoginPassword('admin123')
+                      handleLogin(undefined, 'admin', 'admin123')
+                    }}
+                    className="p-2 border border-slate-200 hover:border-[#004C8F] bg-slate-50 hover:bg-blue-50/50 rounded-xl text-left transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800 group-hover:text-[#004C8F]">admin</span>
+                      <span className="text-[8.5px] font-bold bg-purple-100 text-purple-700 px-1 py-0.5 rounded uppercase">ADMIN</span>
+                    </div>
+                    <span className="text-[9.5px] text-slate-400 font-mono">admin123</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLoginUsername('user')
+                      setLoginPassword('user123')
+                      handleLogin(undefined, 'user', 'user123')
+                    }}
+                    className="p-2 border border-slate-200 hover:border-[#004C8F] bg-slate-50 hover:bg-blue-50/50 rounded-xl text-left transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800 group-hover:text-[#004C8F]">user</span>
+                      <span className="text-[8.5px] font-bold bg-blue-100 text-[#004C8F] px-1 py-0.5 rounded uppercase">USER</span>
+                    </div>
+                    <span className="text-[9.5px] text-slate-400 font-mono">user123</span>
+                  </button>
+                </div>
+              </div>
+
+              <form onSubmit={(e) => handleLogin(e)} className="space-y-3.5 border-t border-slate-100 pt-3.5">
+                <div>
+                  <label className="block text-[9.5px] font-bold text-slate-400 uppercase tracking-wider mb-1">Username</label>
+                  <input
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="Enter username"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-2.5 text-xs text-slate-800 focus:outline-none focus:border-[#004C8F] focus:bg-white transition-all font-sans"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9.5px] font-bold text-slate-400 uppercase tracking-wider mb-1">Password</label>
+                  <input
+                    type="password"
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Enter password"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-2.5 text-xs text-slate-800 focus:outline-none focus:border-[#004C8F] focus:bg-white transition-all font-sans"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loginLoading}
+                  className="w-full py-2 bg-[#004C8F] hover:bg-[#003c73] disabled:opacity-50 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center justify-center gap-1.5 transition-colors shadow-sm mt-2"
+                >
+                  {loginLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-white" />
+                  ) : (
+                    <>
+                      <LogIn className="h-3.5 w-3.5" />
+                      Sign In & Generate JWT
+                    </>
+                  )}
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Floating Corner Toasts overlay (doesn't push UI elements) */}
       <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-3 w-80 pointer-events-none">

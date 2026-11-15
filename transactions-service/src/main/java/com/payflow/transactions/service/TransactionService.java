@@ -2,25 +2,28 @@ package com.payflow.transactions.service;
 
 import com.payflow.transactions.client.AccountView;
 import com.payflow.transactions.client.AccountsClient;
+import com.payflow.transactions.domain.CompensationEntry;
 import com.payflow.transactions.domain.Transaction;
 import com.payflow.transactions.domain.TransactionStatus;
-import com.payflow.transactions.event.TransactionEvent;
+import com.payflow.transactions.repository.CompensationEntryRepository;
 import com.payflow.transactions.repository.TransactionRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 
 /**
  * The two-hop transfer: a synchronous debit/credit against Accounts over REST,
- * followed by an asynchronous publish to Kafka once (and only once) the money has
- * actually moved. Deliberately not wrapped in a single JPA transaction — each
+ * followed by an asynchronous event to Kafka once (and only once) the money has
+ * actually moved. The event goes through the transactional outbox: it is saved in
+ * the same DB transaction as the COMPLETED status and published later by
+ * OutboxPublisher. Deliberately not wrapped in a single JPA transaction — each
  * status change is committed on its own so a FAILED transfer is still recorded
  * even though the request ultimately throws.
  */
@@ -28,21 +31,26 @@ import org.springframework.web.client.RestClientException;
 public class TransactionService {
 
     private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
-    private static final String TOPIC = "transactions";
 
     private final TransactionRepository repository;
     private final AccountsClient accountsClient;
-    private final KafkaTemplate<String, Object> kafkaTemplate;
+    private final TransactionCompletionService completionService;
+    private final CompensationEntryRepository compensationQueue;
     private final DevFaultService devFaultService;
+    private final MeterRegistry meterRegistry;
 
     public TransactionService(TransactionRepository repository,
                               AccountsClient accountsClient,
-                              KafkaTemplate<String, Object> kafkaTemplate,
-                              DevFaultService devFaultService) {
+                              TransactionCompletionService completionService,
+                              CompensationEntryRepository compensationQueue,
+                              DevFaultService devFaultService,
+                              MeterRegistry meterRegistry) {
         this.repository = repository;
         this.accountsClient = accountsClient;
-        this.kafkaTemplate = kafkaTemplate;
+        this.completionService = completionService;
+        this.compensationQueue = compensationQueue;
         this.devFaultService = devFaultService;
+        this.meterRegistry = meterRegistry;
     }
 
     public Transaction transfer(UUID fromAccount, UUID toAccount, BigDecimal amount,
@@ -86,15 +94,14 @@ public class TransactionService {
         try {
             accountsClient.credit(toAccount, amount);
         } catch (RestClientException e) {
-            compensate(fromAccount, amount);
+            compensate(txn, fromAccount, amount);
             return markFailed(txn, "credit failed: " + e.getMessage());
         }
 
-        txn.setCurrency(debited.currency());
-        txn.setStatus(TransactionStatus.COMPLETED);
-        txn = repository.save(txn);
-
-        publish(txn);
+        // COMPLETED status + outbox event commit atomically; the Kafka publish happens later
+        // in OutboxPublisher, so a crash right here cannot lose the event.
+        txn = completionService.complete(txn, debited.currency());
+        meterRegistry.counter("transactions.total", "status", "COMPLETED").increment();
         return txn;
     }
 
@@ -122,25 +129,33 @@ public class TransactionService {
         txn.setStatus(TransactionStatus.FAILED);
         txn.setFailureReason(reason);
         Transaction saved = repository.save(txn);
+        meterRegistry.counter("transactions.total", "status", "FAILED").increment();
         throw new TransferFailedException(saved, reason);
     }
 
-    private void compensate(UUID fromAccount, BigDecimal amount) {
+    /**
+     * Refund the sender after a failed credit. If the refund itself fails, the debit is
+     * still outstanding, so it goes onto the compensation queue for CompensationRetryJob
+     * instead of only being logged.
+     */
+    private void compensate(Transaction txn, UUID fromAccount, BigDecimal amount) {
         try {
             accountsClient.credit(fromAccount, amount);
         } catch (RestClientException e) {
-            // Best effort. In a real system this would go to a reconciliation queue.
-            log.error("Compensating refund to {} failed: {}", fromAccount, e.getMessage());
+            log.error("Compensating refund to {} failed, queueing for retry: {}", fromAccount, e.getMessage());
+            try {
+                CompensationEntry entry = new CompensationEntry();
+                entry.setTransactionId(txn.getId());
+                entry.setReason(e.getMessage() == null ? "refund failed" : e.getMessage());
+                entry.setLastAttemptedAt(Instant.now());
+                compensationQueue.save(entry);
+                meterRegistry.counter("compensation.queued").increment();
+            } catch (RuntimeException queueError) {
+                // Nothing left to fall back on: make it impossible to miss in the logs.
+                log.error("COULD NOT QUEUE COMPENSATION for transaction {} (sender {} owed {}): {}",
+                        txn.getId(), fromAccount, amount, queueError.getMessage());
+            }
         }
-    }
-
-    private void publish(Transaction txn) {
-        TransactionEvent event = new TransactionEvent(
-                txn.getId(), txn.getFromAccount(), txn.getToAccount(),
-                txn.getAmount(), txn.getCurrency(),
-                txn.getDescription(), txn.getMerchant(), Instant.now());
-        kafkaTemplate.send(TOPIC, txn.getId().toString(), event);
-        log.info("Published transaction.completed for {}", txn.getId());
     }
 
     public Transaction get(UUID id) {

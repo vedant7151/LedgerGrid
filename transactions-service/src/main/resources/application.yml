@@ -5,9 +5,15 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/transactions_db}
     username: ${DB_USER:payflow}
     password: ${DB_PASSWORD:payflow}
+  flyway:
+    enabled: true
+    # Lets an existing pre-Flyway dev database (schema already created by Hibernate) be adopted as V1
+    # instead of failing on 'relation already exists'. A fresh/empty database simply runs V1.
+    baseline-on-migrate: true
   jpa:
     hibernate:
-      ddl-auto: update
+      # Schema is owned by Flyway (db/migration); Hibernate only validates it (Phase 9).
+      ddl-auto: validate
     show-sql: true
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
@@ -17,8 +23,13 @@ spring:
 accounts:
   # localhost when run from the IDE; http://accounts-service:8081 in Docker.
   base-url: ${ACCOUNTS_URL:http://localhost:8081}
+jwt:
+  # Shared HMAC secret — must match the same env var across all three services.
+  # Set JWT_SECRET in production; default is a demo-only value, never commit a real secret.
+  secret: ${JWT_SECRET:ledgergrid-demo-secret-change-me-in-production-must-be-32chars}
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus

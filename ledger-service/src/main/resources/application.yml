@@ -5,9 +5,15 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/ledger_db}
     username: ${DB_USER:payflow}
     password: ${DB_PASSWORD:payflow}
+  flyway:
+    enabled: true
+    # Lets an existing pre-Flyway dev database (schema already created by Hibernate) be adopted as V1
+    # instead of failing on 'relation already exists'. A fresh/empty database simply runs V1.
+    baseline-on-migrate: true
   jpa:
     hibernate:
-      ddl-auto: update
+      # Schema is owned by Flyway (db/migration); Hibernate only validates it (Phase 9).
+      ddl-auto: validate
     show-sql: true
   cache:
     type: redis
@@ -21,19 +27,28 @@ spring:
       group-id: ledger-service
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      # ErrorHandlingDeserializer wraps JsonDeserializer so a malformed record becomes a
+      # handled DeserializationException (-> transactions.DLT) instead of an endless
+      # poison-pill loop that blocks the partition (Phase 8).
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
     properties:
+      spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
       spring.json.trusted.packages: "*"
       # The producer stamps a __TypeId__ header for com.payflow.transactions...TransactionEvent,
       # which doesn't exist in this service. Ignore the header and deserialize into our own copy
       # of the record instead. This is the trade-off of duplicating the DTO per service.
       spring.json.use.type.headers: false
       spring.json.value.default.type: com.payflow.ledger.event.TransactionEvent
+jwt:
+  # Shared HMAC secret — must match the same env var across all three services.
+  # Set JWT_SECRET in production; default is a demo-only value, never commit a real secret.
+  secret: ${JWT_SECRET:ledgergrid-demo-secret-change-me-in-production-must-be-32chars}
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
 llm:
   # AI categorization (Phase 4) via Google Gemini. Runs on the enrichment path,
   # not the money path. If api-key is empty the categorizer skips the LLM and uses

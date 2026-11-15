@@ -19,7 +19,9 @@ public record LedgerEntryResponse(
         Instant recordedAt,
         Long chainIndex,
         String previousHash,
-        String entryHash
+        String entryHash,
+        boolean isAnomalous,
+        String anomalyReason
 ) {
     public static LedgerEntryResponse from(LedgerEntry entry) {
         return new LedgerEntryResponse(
@@ -35,6 +37,8 @@ public record LedgerEntryResponse(
                 entry.getRecordedAt(),
                 entry.getChainIndex(),
                 entry.getPreviousHash(),
-                entry.getEntryHash());
+                entry.getEntryHash(),
+                entry.isAnomalous(),
+                entry.getAnomalyReason());
     }
 }

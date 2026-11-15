@@ -1,11 +1,13 @@
 package com.payflow.ledger.web;
 
+import com.payflow.ledger.service.LedgerReportService;
 import com.payflow.ledger.service.LedgerService;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -18,9 +20,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class LedgerController {
 
     private final LedgerService ledgerService;
+    private final LedgerReportService ledgerReportService;
 
-    public LedgerController(LedgerService ledgerService) {
+    public LedgerController(LedgerService ledgerService, LedgerReportService ledgerReportService) {
         this.ledgerService = ledgerService;
+        this.ledgerReportService = ledgerReportService;
     }
 
     @GetMapping
@@ -31,6 +35,15 @@ public class LedgerController {
     @GetMapping("/account/{id}")
     public List<LedgerEntryResponse> byAccount(@PathVariable UUID id) {
         return ledgerService.getByAccount(id).entries();
+    }
+
+    /**
+     * Aggregated risk and anomaly detection report over a configurable timeframe (default 24h).
+     * Protected by JWT auth like standard business endpoints.
+     */
+    @GetMapping("/report")
+    public LedgerReportResponse report(@RequestParam(name = "since", defaultValue = "24h") String since) {
+        return ledgerReportService.generateReport(since);
     }
 
     /**

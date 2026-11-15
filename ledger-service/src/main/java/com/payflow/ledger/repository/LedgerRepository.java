@@ -1,6 +1,7 @@
 package com.payflow.ledger.repository;
 
 import com.payflow.ledger.domain.LedgerEntry;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,6 +13,12 @@ public interface LedgerRepository extends JpaRepository<LedgerEntry, UUID> {
 
     /** Entries where the account is either the sender or the receiver, newest first. */
     List<LedgerEntry> findByFromAccountOrToAccountOrderByRecordedAtDesc(UUID fromAccount, UUID toAccount);
+
+    /** Entries sent by the given account, newest first, for rolling anomaly detection. */
+    List<LedgerEntry> findByFromAccountOrderByRecordedAtDesc(UUID fromAccount);
+
+    /** Entries recorded since the given timestamp, for on-demand reporting. */
+    List<LedgerEntry> findByRecordedAtGreaterThanEqualOrderByRecordedAtDesc(Instant cutoff);
 
     boolean existsByTransactionId(UUID transactionId);
 
